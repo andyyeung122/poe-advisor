@@ -47,15 +47,20 @@ def chunk(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return chunks or [text[:size]]
 
 
-def _age_days(published: str | None) -> float | None:
+def parse_date(published: str | None) -> datetime | None:
     if not published:
         return None
     try:
         dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _age_days(published: str | None) -> float | None:
+    dt = parse_date(published)
+    if dt is None:
+        return None
     return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400)
 
 
@@ -112,7 +117,9 @@ class KnowledgeBase:
         corpus = [tokenize(f"{c.title} {c.title} {c.text}") for c in self._chunks]  # title counted twice
         self._bm25 = BM25Plus(corpus) if corpus else None
 
-    def search(self, query: str, k: int = 6, max_age_days: float | None = None) -> list[dict[str, Any]]:
+    def search(self, query: str, k: int = 6, max_age_days: float | None = None,
+               since: datetime | None = None) -> list[dict[str, Any]]:
+        """BM25 search blended with recency. ``since`` drops passages published before it, and undated ones."""
         if self._bm25 is None:
             self._index()
         if self._bm25 is None:
@@ -128,6 +135,10 @@ class KnowledgeBase:
             age = _age_days(piece.published)
             if max_age_days is not None and age is not None and age > max_age_days:
                 continue
+            if since is not None:
+                published = parse_date(piece.published)
+                if published is None or published < since:
+                    continue
             decay = 0.5 ** (age / HALF_LIFE_DAYS) if age is not None else 0.5
             ranked.append((score * (0.5 + 0.5 * decay), age, piece))
         ranked.sort(key=lambda r: -r[0])

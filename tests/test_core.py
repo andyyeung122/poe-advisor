@@ -119,6 +119,34 @@ def test_knowledge_base_prefers_recent(tmp_path):
     assert len(KnowledgeBase(tmp_path / "kb.jsonl")) == 2  # persisted
 
 
+def test_search_knowledge_current_league_only(tmp_path, monkeypatch):
+    from poe_advisor.tools import Toolbox
+
+    now = datetime.now(timezone.utc)
+    kb = KnowledgeBase(tmp_path / "kb.jsonl")
+    kb.add([
+        {"id": "pre", "title": "Scarab farming", "url": "u1", "source": "reddit",
+         "published": (now - timedelta(days=10)).isoformat(), "text": "atlas farming strategy profit"},
+        {"id": "post", "title": "Thread farming", "url": "u2", "source": "reddit",
+         "published": (now - timedelta(days=1)).isoformat(), "text": "atlas farming strategy profit"},
+        {"id": "undated", "title": "Farming", "url": "u3", "source": "guide", "published": None,
+         "text": "atlas farming strategy profit"},
+    ])
+    toolbox = Toolbox(kb)
+    monkeypatch.setattr(ninja, "league_start", lambda league=None: now - timedelta(days=3))
+
+    filtered = toolbox.search_knowledge("atlas farming", current_league_only=True)
+    assert [h["url"] for h in filtered["results"]] == ["u2"]
+    assert filtered["results"][0]["before_league_start"] is False
+
+    unfiltered = {h["url"]: h["before_league_start"] for h in toolbox.search_knowledge("atlas farming")["results"]}
+    assert unfiltered == {"u1": True, "u2": False, "u3": True}
+
+    monkeypatch.setattr(ninja, "league_start", lambda league=None: None)
+    fallback = toolbox.search_knowledge("atlas farming", current_league_only=True)
+    assert len(fallback["results"]) == 3 and "not filtered" in fallback["hint"]
+
+
 def test_chunking_splits_long_text():
     pieces = chunk("\n\n".join(["word " * 100] * 10), size=1200)
     assert len(pieces) > 1 and all(len(p) <= 1300 for p in pieces)

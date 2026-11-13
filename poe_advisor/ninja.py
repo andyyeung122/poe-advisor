@@ -5,14 +5,17 @@ from __future__ import annotations
 import difflib
 import re
 import time
+from datetime import datetime
 from typing import Any, Iterable
 
 from . import net
 from .config import settings
 
 BASE = "https://poe.ninja/poe1/api"
+GGG_LEAGUES = "https://www.pathofexile.com/api/leagues"  # has start dates, which poe.ninja lacks
 PRICE_TTL = 30 * 60
 INDEX_TTL = 10 * 60
+LEAGUES_TTL = 6 * 60 * 60
 
 # Bulk-tradeable goods priced from the in-game currency exchange.
 EXCHANGE_TYPES = [
@@ -86,6 +89,19 @@ def current_league() -> str:
         if _is_trade_league(league["name"]):
             return league["name"]
     return "Standard"
+
+
+def league_start(league: str | None = None) -> datetime | None:
+    """When a league started, from GGG's public league list. None if unknown or the lookup fails."""
+    try:
+        league = league or current_league()
+        entries = net.get(GGG_LEAGUES, params={"type": "main", "realm": settings.realm}, cache_ttl=LEAGUES_TTL)
+    except Exception:  # optional context: callers fall back to no cutoff
+        return None
+    for entry in entries:
+        if entry.get("id", "").lower() == league.lower() and entry.get("startAt"):
+            return datetime.fromisoformat(entry["startAt"].replace("Z", "+00:00"))
+    return None
 
 
 def league_slug(league: str, kind: str = "buildLeagues") -> str:

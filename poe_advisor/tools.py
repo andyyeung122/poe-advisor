@@ -10,7 +10,7 @@ import jsonschema
 from . import account as ggg
 from . import analysis, feeds, ninja, pob, trade
 from .config import settings
-from .rag import KnowledgeBase
+from .rag import KnowledgeBase, parse_date
 
 MAX_RESULT_CHARS = 14000
 
@@ -147,13 +147,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "search_knowledge",
         "description": "Retrieve passages from the local knowledge base of ingested Reddit posts and guides "
-                       "(money-making strategies, build advice). Results include age; prefer recent ones.",
+                       "(money-making strategies, build advice). Results include age and, when the league start "
+                       "is known, before_league_start: those posts describe an older patch.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "k": {"type": "integer", "minimum": 1, "maximum": 12},
                 "max_age_days": {"type": "number", "description": "Drop passages older than this."},
+                "current_league_only": {"type": "boolean",
+                                        "description": "Only posts published since the session league started."},
             },
             "required": ["query"], "additionalProperties": False,
         },
@@ -281,10 +284,23 @@ class Toolbox:
 
     # -- knowledge ----------------------------------------------------------
 
-    def search_knowledge(self, query: str, k: int = 6, max_age_days: float | None = None) -> dict[str, Any]:
-        hits = self.kb.search(query, k=k, max_age_days=max_age_days)
-        return {"documents_in_kb": len(self.kb), "results": hits,
-                "hint": None if hits else "No matches; try reddit_search or web_search."}
+    def search_knowledge(self, query: str, k: int = 6, max_age_days: float | None = None,
+                         current_league_only: bool = False) -> dict[str, Any]:
+        start = ninja.league_start()
+        hits = self.kb.search(query, k=k, max_age_days=max_age_days, since=start if current_league_only else None)
+        if start:
+            for hit in hits:
+                published = parse_date(hit["published"])
+                hit["before_league_start"] = published is None or published < start
+        hints = []
+        if current_league_only and start is None:
+            hints.append("League start date unavailable, so results are not filtered by league.")
+        if not hits:
+            hints.append("No posts since the league started; try reddit_search with time_range week or day, "
+                         "or web_search." if current_league_only and start else
+                         "No matches; try reddit_search or web_search.")
+        return {"documents_in_kb": len(self.kb), "league_started": start.isoformat() if start else None,
+                "results": hits, "hint": " ".join(hints) or None}
 
     def reddit_search(self, query: str, subreddit: str = "pathofexile", time_range: str = "month",
                       limit: int = 8, include_comments: bool = False) -> dict[str, Any]:
