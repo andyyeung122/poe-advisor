@@ -274,12 +274,13 @@ def _pick_row(rows: list[dict[str, Any]], like: dict[str, Any] | None) -> dict[s
     return max(rows, key=key)
 
 
-def _series(category: str, item_id: Any, league: str, past: bool) -> tuple[str, list[dict[str, Any]]]:
+def _series(category: str, item_id: Any, league: str, past: bool,
+            cache: bool = True) -> tuple[str, list[dict[str, Any]]]:
     """Daily price points for one item as (unit, [{day, date, value, volume}]), oldest first.
 
     ``day`` counts from the first data point poe.ninja has for that league (a proxy for league start).
     """
-    ttl = HISTORY_TTL_PAST if past else HISTORY_TTL_LIVE
+    ttl = (HISTORY_TTL_PAST if cache else 0) if past else HISTORY_TTL_LIVE  # no disk copy when a store keeps it
     if category in EXCHANGE_TYPES:
         data = net.get(f"{BASE}/economy/exchange/current/details",
                        params={"league": league, "type": category, "id": item_id}, cache_ttl=ttl)
@@ -333,8 +334,12 @@ def _league_summary(league: str, status: str, unit: str, points: list[dict[str, 
 
 
 def item_history(name: str, category: str | None = None, league: str | None = None,
-                 past_leagues: int = 0) -> dict[str, Any]:
-    """Weekly price trajectory of one item in a league, optionally alongside past leagues for comparison."""
+                 past_leagues: int = 0, store: Any = None) -> dict[str, Any]:
+    """Weekly price trajectory of one item in a league, optionally alongside past leagues for comparison.
+
+    ``store`` (a HistoryStore) is read first for past leagues and written after a live fetch. Without one, past
+    leagues come from poe.ninja and are cached on disk for a day.
+    """
     league = league or current_league()
     hits = search_prices(name, [category] if category else None, league=league, limit=5)
     exact = [h for h in hits if _norm(h["name"] or "") == _norm(name)]
@@ -350,26 +355,45 @@ def item_history(name: str, category: str | None = None, league: str | None = No
     else:
         results.append({"league": league, "status": "requested", "error": "no history yet"})
 
+    variant = {k: row[k] for k in _VARIANT_KEYS if row.get(k) is not None}
+    notes: list[str] = []
     if past_leagues:
         old = [n for n in list_leagues()["old_economy"] if _is_trade_league(n) and n.lower() != league.lower()]
         for past in old[:past_leagues]:
             try:
+                if store is not None:
+                    try:
+                        stored = store.get(past, category, row["name"], variant)
+                    except Exception as exc:  # a store outage must not break the lookup
+                        notes.append(f"History store read failed ({str(exc)[:80]}); using poe.ninja directly.")
+                        store, stored = None, None
+                    if stored:
+                        results.append(stored)
+                        continue
                 cands = [r for r in overview(category, past) if _norm(r["name"] or "") == _norm(row["name"] or "")]
                 match = _pick_row(cands, row)
                 if match is None:
                     results.append({"league": past, "status": "past", "error": f"{row['name']} not priced in {past}"})
                     continue
-                unit, points = _series(category, match["item_id"], past, past=True)
-                results.append(_league_summary(past, "past", unit, points) if points
-                               else {"league": past, "status": "past", "error": "no history"})
+                unit, points = _series(category, match["item_id"], past, past=True, cache=store is None)
+                if not points:
+                    results.append({"league": past, "status": "past", "error": "no history"})
+                    continue
+                summary = _league_summary(past, "past", unit, points)
+                results.append(summary)
+                if store is not None:
+                    try:
+                        store.save(row["name"], category, variant, summary)
+                    except Exception as exc:
+                        notes.append(f"History store write failed ({str(exc)[:80]}).")
             except Exception as exc:  # one missing league (404) shouldn't hide the others
                 results.append({"league": past, "status": "past", "error": str(exc)[:120]})
 
     return {
         "item": row["name"], "category": category,
-        "variant": {k: row[k] for k in _VARIANT_KEYS if row.get(k) is not None},
+        "variant": variant,
         "leagues": results,
-        "notes": [
+        "notes": notes + [
             "Weeks count from the first poe.ninja data point of each league (about league start); week 1 prices are "
             "thin and noisy.",
             "Each league has its own economy and mechanics: treat similar trajectories across leagues as a pattern, "

@@ -116,6 +116,58 @@ def cmd_kb(args: argparse.Namespace) -> None:
                       f"[/dim]\n{hit['url']}\n{hit['text'][:500]}\n")
 
 
+def _build_item_names(build: dict) -> list[str]:
+    """Unique items, active gems and Awakened supports of a loaded build, deduplicated."""
+    names: list[str] = []
+    for group in ("items", "flasks", "jewels"):
+        names += [i["name"] for i in build.get(group) or [] if i.get("rarity") == "Unique" and i.get("name")]
+    for skill in build.get("skills") or []:
+        names += [g["name"] for g in skill.get("gems") or []
+                  if g.get("name") and (not g.get("support") or g["name"].startswith("Awakened"))]
+    return list(dict.fromkeys(names))
+
+
+def cmd_history(args: argparse.Namespace) -> None:
+    from .history_store import HistoryStore
+
+    store = HistoryStore.from_settings()
+    if store is None:
+        console.print("[red]Turso is not configured.[/red] Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env "
+                      "(see .env.example).")
+        sys.exit(1)
+    if args.history_command == "stats":
+        console.print(f"{store.count()} saved item/league records in Turso.")
+        return
+
+    names = list(args.names or [])
+    if args.build:
+        from .tools import Toolbox
+
+        toolbox = Toolbox()
+        toolbox.load_character()  # the player's own character from .env
+        names += _build_item_names(toolbox.build or {})
+    names = list(dict.fromkeys(names))
+    if not names:
+        console.print("[red]Give item names, or --build to use the character configured in .env.[/red]")
+        sys.exit(1)
+    console.print(f"Saving the {args.past} most recent past leagues for {len(names)} items to Turso...")
+    for name in names:
+        try:
+            out = ninja.item_history(name, category=args.category, past_leagues=args.past, store=store)
+        except Exception as exc:
+            console.print(f"  [yellow]! {name}: {exc}[/yellow]")
+            continue
+        past = [l for l in out["leagues"] if l.get("status") == "past"]
+        saved = [l["league"] for l in past if "error" not in l]
+        skipped = [f"{l['league']} ({l['error']})" for l in past if "error" in l]
+        line = f"  {out['item']}: {', '.join(saved) or 'nothing'}"
+        console.print(line + (f" [dim]skipped: {'; '.join(skipped)}[/dim]" if skipped else ""))
+        for note in out["notes"]:
+            if "store" in note:
+                console.print(f"    [yellow]{note}[/yellow]")
+    console.print(f"[green]Done.[/green] {store.count()} records in the store.")
+
+
 HELP = """Commands: /league [name] (show or switch league) · /leagues · /build · /reset · /kb · /quit
 Examples:
   load my character Name#1234 / CharName
@@ -250,6 +302,16 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("query", nargs="+")
     s.add_argument("-k", type=int, default=5)
     p.set_defaults(func=cmd_kb)
+
+    p = sub.add_parser("history", help="Save past-league price history to Turso")
+    h_sub = p.add_subparsers(dest="history_command", required=True)
+    s = h_sub.add_parser("save", help="Fetch past leagues for items and store them")
+    s.add_argument("names", nargs="*", help="Item names, e.g. Mageblood 'Divine Orb'")
+    s.add_argument("--build", action="store_true", help="Also use the uniques and gems of the character in .env")
+    s.add_argument("--past", type=int, default=3, help="How many past leagues to save (default 3)")
+    s.add_argument("--category", choices=ninja.ALL_TYPES)
+    h_sub.add_parser("stats", help="How many records are stored")
+    p.set_defaults(func=cmd_history)
 
     p = sub.add_parser("leagues", help="List leagues poe.ninja tracks")
     p.set_defaults(func=cmd_leagues)

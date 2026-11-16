@@ -10,6 +10,7 @@ import jsonschema
 from . import account as ggg
 from . import analysis, feeds, ninja, pob, trade
 from .config import settings
+from .history_store import HistoryStore
 from .rag import KnowledgeBase, parse_date
 
 MAX_RESULT_CHARS = 14000
@@ -121,6 +122,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "history_search",
+        "description": "Find saved past-league price curves by shape, for market-wide pattern questions such as "
+                       "'currencies that peak early then crash' (peak_by_week=3, final_pct_max=-30) or 'items that "
+                       "rise all league' (peak_after_week=8, final_pct_min=100). Percentages are change versus week "
+                       "1. Only covers items already saved by price_history(past_leagues=...) or the `history save` "
+                       "command, so say how many records it holds.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "league": {"type": "string", "description": "Only this past league."},
+                "category": {"type": "string", "enum": ninja.ALL_TYPES},
+                "peak_by_week": {"type": "integer", "description": "Peak week is at most this."},
+                "peak_after_week": {"type": "integer", "description": "Peak week is later than this."},
+                "final_pct_min": {"type": "number"}, "final_pct_max": {"type": "number"},
+                "min_weeks": {"type": "integer", "minimum": 1, "description": "Ignore leagues with less data."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "find_trade_stat",
         "description": "Resolve mod text such as '+# to maximum Life' or '#% chance to Suppress Spell Damage' to "
                        "official trade stat ids. Prefer pseudo.* ids (they total a stat across all mods).",
@@ -210,7 +232,7 @@ class Toolbox:
             "load_character": self.load_character, "list_characters": self.list_characters,
             "load_pob": self.load_pob, "active_build": self.active_build,
             "price_check": self.price_check, "market_overview": self.market_overview,
-            "price_history": self.price_history, "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
+            "price_history": self.price_history, "history_search": self.history_search, "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
             "search_knowledge": self.search_knowledge, "reddit_search": self.reddit_search,
         }
 
@@ -295,7 +317,16 @@ class Toolbox:
 
     def price_history(self, name: str, category: str | None = None, past_leagues: int = 0,
                       league: str | None = None) -> dict[str, Any]:
-        return ninja.item_history(name, category, league, past_leagues)
+        return ninja.item_history(name, category, league, past_leagues, store=HistoryStore.from_settings())
+
+    def history_search(self, **filters: Any) -> dict[str, Any]:
+        store = HistoryStore.from_settings()
+        if store is None:
+            raise RuntimeError("Turso is not configured (set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env); "
+                               "use price_history for a single item instead.")
+        return {"saved_records": store.count(), "matches": store.search(**filters),
+                "note": "Only items saved earlier are searched. A shared shape across past leagues is a pattern, "
+                        "not a prediction."}
 
     def find_trade_stat(self, text: str, limit: int = 6) -> list[dict[str, str]]:
         return trade.find_stats(text, limit)

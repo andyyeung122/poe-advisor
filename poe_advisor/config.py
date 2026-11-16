@@ -36,6 +36,10 @@ class Settings:
     # GGG asks API consumers to identify themselves with a contact address.
     contact: str = field(default_factory=lambda: os.getenv("POE_ADVISOR_CONTACT", "unset"))
 
+    # Turso: stores past-league price history (empty = past leagues are fetched from poe.ninja and cached on disk)
+    turso_url: str = field(default_factory=lambda: os.getenv("TURSO_DATABASE_URL", ""))
+    turso_token: str = field(default_factory=lambda: os.getenv("TURSO_AUTH_TOKEN", ""))
+
     # Local storage
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("POE_ADVISOR_DATA", PROJECT_ROOT / "data")))
 

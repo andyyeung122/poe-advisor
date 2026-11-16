@@ -177,6 +177,146 @@ def test_item_history_compares_current_and_past_leagues(monkeypatch):
     assert then["trough"]["week"] == 2
 
 
+class FakeTurso:
+    """Stands in for Turso's HTTP API: runs the statements on in-memory SQLite and answers in Hrana format."""
+
+    def __init__(self):
+        import sqlite3
+
+        self.db = sqlite3.connect(":memory:")
+        self.requests = 0
+        self.auth: list[str] = []
+
+    def post(self, url, json, headers):
+        assert url.endswith("/v2/pipeline") and url.startswith("https://")
+        self.auth.append(headers["Authorization"])
+        self.requests += 1
+        results = []
+        for req in json["requests"]:
+            if req["type"] != "execute":
+                continue
+            args = [None if a["type"] == "null" else int(a["value"]) if a["type"] == "integer" else a["value"]
+                    for a in req["stmt"]["args"]]
+            cur = self.db.execute(req["stmt"]["sql"], args)
+            cols = [{"name": d[0]} for d in cur.description or []]
+
+            def cell(v):
+                if v is None:
+                    return {"type": "null"}
+                if isinstance(v, int):
+                    return {"type": "integer", "value": str(v)}
+                if isinstance(v, float):
+                    return {"type": "float", "value": v}
+                return {"type": "text", "value": v}
+
+            rows = [[cell(v) for v in row] for row in cur.fetchall()]
+            results.append({"type": "ok", "response": {"type": "execute", "result": {"cols": cols, "rows": rows}}})
+        self.db.commit()
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": results + [{"type": "ok", "response": {"type": "close"}}]}
+
+        return Resp()
+
+
+def _history_fixture(monkeypatch, fetches):
+    row = {"item_id": "divine-orb", "name": "Divine Orb", "category": "Currency", "chaos": 10.0}
+    ttls: list[tuple[str, float]] = []
+
+    def fake_get(url, **kwargs):
+        league = kwargs["params"]["league"]
+        fetches.append(league)
+        ttls.append((league, kwargs.get("cache_ttl", 0)))
+        hist = [{"timestamp": f"2026-03-{d:02d}T00:00:00Z", "rate": 100 if d < 8 else 50} for d in range(1, 15)]
+        return {"pairs": [{"id": "chaos", "history": hist}]}
+
+    monkeypatch.setattr(ninja, "search_prices", lambda *a, **k: [row])
+    monkeypatch.setattr(ninja, "overview", lambda category, league=None: [row])
+    monkeypatch.setattr(ninja, "list_leagues", lambda *a, **k: {"old_economy": ["Then"]})
+    monkeypatch.setattr(net, "get", fake_get)
+    return ttls
+
+
+def test_past_league_history_is_saved_then_read_from_store(monkeypatch):
+    from poe_advisor.history_store import HistoryStore
+
+    fetches: list[str] = []
+    ttls = _history_fixture(monkeypatch, fetches)
+    fake = FakeTurso()
+    store = HistoryStore("libsql://db-org.turso.io", "secret", http=fake)
+
+    first = ninja.item_history("Divine Orb", league="Now", past_leagues=1, store=store)
+    assert fetches == ["Now", "Then"] and store.count() == 1
+    assert ("Then", 0) in ttls  # the store holds it, so no disk copy
+    assert set(fake.auth) == {"Bearer secret"}
+
+    fetches.clear()
+    second = ninja.item_history("Divine Orb", league="Now", past_leagues=1, store=store)
+    assert fetches == ["Now"]  # "Then" came from Turso: no poe.ninja call
+    assert second["leagues"][1]["source"] == "turso"
+    assert second["leagues"][1]["weekly"] == first["leagues"][1]["weekly"]
+    assert second["leagues"][1]["peak"] == first["leagues"][1]["peak"]
+
+
+def test_past_league_history_is_disk_cached_without_a_store(monkeypatch):
+    fetches: list[str] = []
+    ttls = _history_fixture(monkeypatch, fetches)
+    ninja.item_history("Divine Orb", league="Now", past_leagues=1)
+    assert ("Then", ninja.HISTORY_TTL_PAST) in ttls
+
+
+def test_history_store_search_filters_by_shape():
+    from poe_advisor.history_store import HistoryStore
+
+    store = HistoryStore("https://db.turso.io", "t", http=FakeTurso())
+
+    def summary(league, pcts):
+        weekly = [{"week": i + 1, "median": 100 + p, "days": 7, "pct_vs_week1": p} for i, p in enumerate(pcts)]
+        top = max(weekly, key=lambda w: w["median"])
+        low = min(weekly, key=lambda w: w["median"])
+        return {"league": league, "unit": "chaos", "days_of_data": 7 * len(pcts), "latest": 1.0,
+                "peak": {"week": top["week"], "median": top["median"]},
+                "trough": {"week": low["week"], "median": low["median"]}, "weekly": weekly}
+
+    store.save("Crasher", "Currency", None, summary("A", [0, 80, 40, -30, -50]))
+    store.save("Climber", "Currency", None, summary("A", [0, 20, 50, 90, 160]))
+    store.save("Thin", "Currency", None, summary("A", [0, 10]))  # under min_weeks
+
+    early = store.search(peak_by_week=3, final_pct_max=-30)
+    assert [r["item"] for r in early] == ["Crasher"]
+    late = store.search(peak_after_week=3, final_pct_min=100, category="Currency")
+    assert [r["item"] for r in late] == ["Climber"] and late[0]["peak_pct"] == 160
+    assert store.count() == 3 and store.get("A", "Currency", "Thin", None)["weekly"][1]["pct_vs_week1"] == 10
+
+
+def test_store_error_response_and_outage_fall_back_to_poe_ninja(monkeypatch):
+    from poe_advisor.history_store import HistoryStore
+
+    class Down:
+        def post(self, *a, **k):
+            raise RuntimeError("503 service unavailable")
+
+    fetches: list[str] = []
+    ttls = _history_fixture(monkeypatch, fetches)
+    out = ninja.item_history("Divine Orb", league="Now", past_leagues=1,
+                             store=HistoryStore("https://db.turso.io", "t", http=Down()))
+    assert "error" not in out["leagues"][1] and any("store read failed" in n for n in out["notes"])
+    assert ("Then", ninja.HISTORY_TTL_PAST) in ttls  # store dropped, so the disk cache applies again
+
+
+def test_history_search_requires_configuration(monkeypatch, tmp_path):
+    from poe_advisor import history_store
+    from poe_advisor.tools import Toolbox
+
+    monkeypatch.setattr(history_store, "configured", lambda: False)
+    text, is_error = Toolbox(KnowledgeBase(tmp_path / "kb.jsonl")).run("history_search", {})
+    assert is_error and "not configured" in text
+
+
 def test_item_history_stash_series_uses_days_ago(monkeypatch):
     monkeypatch.setattr(net, "get", lambda url, **k: [{"count": 1, "value": 30, "daysAgo": 0},
                                                       {"count": 1, "value": 10, "daysAgo": 2}])
