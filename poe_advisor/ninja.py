@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import statistics
 import time
 from datetime import datetime
 from typing import Any, Iterable
@@ -124,6 +125,7 @@ def _normalize_exchange(category: str, data: dict[str, Any]) -> list[dict[str, A
         item = names.get(line["id"], {})
         chaos = line.get("primaryValue")
         out.append({
+            "item_id": item.get("detailsId") or line["id"],  # the history endpoint wants detailsId, not the line id
             "name": item.get("name", line["id"]),
             "category": category,
             "subcategory": item.get("category"),
@@ -139,6 +141,7 @@ def _normalize_stash(category: str, data: dict[str, Any]) -> list[dict[str, Any]
     out = []
     for line in data.get("lines", []):
         row = {
+            "item_id": line.get("id"),
             "name": line.get("name"),
             "category": category,
             "chaos": line.get("chaosValue"),
@@ -249,6 +252,130 @@ def market_movers(category: str, league: str | None = None, sort: str = "value",
     if sort not in keys:
         raise NinjaError(f"sort must be one of {sorted(keys)}")
     return sorted(rows, key=keys[sort], reverse=True)[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Price history (current and past leagues)
+
+HISTORY_TTL_LIVE = 30 * 60
+HISTORY_TTL_PAST = 24 * 60 * 60  # a finished league's history no longer changes
+_VARIANT_KEYS = ("variant", "links", "gem_level", "gem_quality", "corrupted", "map_tier", "base_type")
+
+
+def _pick_row(rows: list[dict[str, Any]], like: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Best row among same-name candidates, preferring the same variant/links/gem level as ``like``."""
+    if not rows:
+        return None
+
+    def key(row: dict[str, Any]) -> tuple[int, float]:
+        same = sum(1 for k in _VARIANT_KEYS if like and row.get(k) == like.get(k))
+        return same, row.get("listings") or row.get("volume_chaos_per_hour") or 0
+
+    return max(rows, key=key)
+
+
+def _series(category: str, item_id: Any, league: str, past: bool) -> tuple[str, list[dict[str, Any]]]:
+    """Daily price points for one item as (unit, [{day, date, value, volume}]), oldest first.
+
+    ``day`` counts from the first data point poe.ninja has for that league (a proxy for league start).
+    """
+    ttl = HISTORY_TTL_PAST if past else HISTORY_TTL_LIVE
+    if category in EXCHANGE_TYPES:
+        data = net.get(f"{BASE}/economy/exchange/current/details",
+                       params={"league": league, "type": category, "id": item_id}, cache_ttl=ttl)
+        pairs = [p for p in data.get("pairs", []) if p.get("history")]
+        if not pairs:
+            return "chaos", []
+        pair = max(pairs, key=lambda p: len(p["history"]))  # high-value items trade mostly against divines
+        raw = sorted(
+            ((datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")), h.get("rate"), h.get("volumePrimaryValue"))
+             for h in pair["history"] if h.get("rate") is not None),
+            key=lambda t: t[0],
+        )
+        if not raw:
+            return pair["id"], []
+        start = raw[0][0]
+        return pair["id"], [{"day": (ts - start).days, "date": ts.date().isoformat(), "value": rate, "volume": vol}
+                            for ts, rate, vol in raw]
+    data = net.get(f"{BASE}/economy/stash/current/item/history",
+                   params={"league": league, "type": category, "id": item_id}, cache_ttl=ttl)
+    raw = [h for h in data if h.get("value") is not None and h.get("daysAgo") is not None]
+    if not raw:
+        return "chaos", []
+    oldest = max(h["daysAgo"] for h in raw)
+    return "chaos", [{"day": oldest - h["daysAgo"], "date": None, "value": h["value"], "volume": h.get("count")}
+                     for h in sorted(raw, key=lambda h: -h["daysAgo"])]
+
+
+def _weekly(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Median price per league week (week 1 = first 7 days of data), with change versus week 1."""
+    buckets: dict[int, list[float]] = {}
+    for p in points:
+        buckets.setdefault(p["day"] // 7 + 1, []).append(p["value"])
+    weeks = [{"week": w, "median": round(statistics.median(v), 3), "days": len(v)} for w, v in sorted(buckets.items())]
+    base = next((w["median"] for w in weeks if w["week"] == 1), None)
+    for w in weeks:
+        w["pct_vs_week1"] = round((w["median"] / base - 1) * 100, 1) if base else None
+    return weeks
+
+
+def _league_summary(league: str, status: str, unit: str, points: list[dict[str, Any]]) -> dict[str, Any]:
+    weeks = _weekly(points)
+    peak = max(weeks, key=lambda w: w["median"])
+    trough = min(weeks, key=lambda w: w["median"])
+    return {
+        "league": league, "status": status, "unit": unit,
+        "days_of_data": points[-1]["day"] + 1, "latest": points[-1]["value"],
+        "peak": {"week": peak["week"], "median": peak["median"]},
+        "trough": {"week": trough["week"], "median": trough["median"]},
+        "weekly": weeks,
+    }
+
+
+def item_history(name: str, category: str | None = None, league: str | None = None,
+                 past_leagues: int = 0) -> dict[str, Any]:
+    """Weekly price trajectory of one item in a league, optionally alongside past leagues for comparison."""
+    league = league or current_league()
+    hits = search_prices(name, [category] if category else None, league=league, limit=5)
+    exact = [h for h in hits if _norm(h["name"] or "") == _norm(name)]
+    row = _pick_row(exact, None) or (hits[0] if hits else None)
+    if row is None or row.get("item_id") is None:
+        raise NinjaError(f"No poe.ninja price row for {name!r} in {league}. Try price_check to find the exact name.")
+    category = row["category"]
+
+    results = []
+    unit, points = _series(category, row["item_id"], league, past=False)
+    if points:
+        results.append(_league_summary(league, "requested", unit, points))
+    else:
+        results.append({"league": league, "status": "requested", "error": "no history yet"})
+
+    if past_leagues:
+        old = [n for n in list_leagues()["old_economy"] if _is_trade_league(n) and n.lower() != league.lower()]
+        for past in old[:past_leagues]:
+            try:
+                cands = [r for r in overview(category, past) if _norm(r["name"] or "") == _norm(row["name"] or "")]
+                match = _pick_row(cands, row)
+                if match is None:
+                    results.append({"league": past, "status": "past", "error": f"{row['name']} not priced in {past}"})
+                    continue
+                unit, points = _series(category, match["item_id"], past, past=True)
+                results.append(_league_summary(past, "past", unit, points) if points
+                               else {"league": past, "status": "past", "error": "no history"})
+            except Exception as exc:  # one missing league (404) shouldn't hide the others
+                results.append({"league": past, "status": "past", "error": str(exc)[:120]})
+
+    return {
+        "item": row["name"], "category": category,
+        "variant": {k: row[k] for k in _VARIANT_KEYS if row.get(k) is not None},
+        "leagues": results,
+        "notes": [
+            "Weeks count from the first poe.ninja data point of each league (about league start); week 1 prices are "
+            "thin and noisy.",
+            "Each league has its own economy and mechanics: treat similar trajectories across leagues as a pattern, "
+            "not a prediction. Units differ per league (chaos or divine): compare pct_vs_week1, not raw medians.",
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

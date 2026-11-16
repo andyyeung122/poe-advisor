@@ -147,6 +147,43 @@ def test_search_knowledge_current_league_only(tmp_path, monkeypatch):
     assert len(fallback["results"]) == 3 and "not filtered" in fallback["hint"]
 
 
+def test_item_history_compares_current_and_past_leagues(monkeypatch):
+    def row(item_id, chaos=10.0):
+        return {"item_id": item_id, "name": "Divine Orb", "category": "Currency", "chaos": chaos, "volume_chaos_per_hour": 5}
+
+    def fake_overview(category, league=None):
+        return [row("divine-orb")] if league != "Ghost" else []
+
+    def fake_get(url, **kwargs):
+        league = kwargs["params"]["league"]
+        if league == "Now":  # 10 days, price doubles in week 2
+            hist = [{"timestamp": f"2026-11-{d:02d}T00:00:00Z", "rate": 100 if d < 8 else 200} for d in range(1, 11)]
+        else:  # past league, newest first like the real API: 100 -> 50
+            hist = [{"timestamp": f"2026-03-{d:02d}T00:00:00Z", "rate": 100 if d < 8 else 50} for d in range(14, 0, -1)]
+        return {"pairs": [{"id": "chaos", "history": hist}, {"id": "divine", "history": []}]}
+
+    monkeypatch.setattr(ninja, "search_prices", lambda *a, **k: [row("divine-orb")])
+    monkeypatch.setattr(ninja, "overview", fake_overview)
+    monkeypatch.setattr(ninja, "list_leagues", lambda *a, **k: {"old_economy": ["Ghost", "Hardcore Old", "Then"]})
+    monkeypatch.setattr(net, "get", fake_get)
+
+    out = ninja.item_history("Divine Orb", league="Now", past_leagues=3)
+    now, ghost, then = out["leagues"]  # Hardcore leagues are skipped
+    assert now["status"] == "requested" and now["days_of_data"] == 10
+    assert [w["pct_vs_week1"] for w in now["weekly"]] == [0.0, 100.0]
+    assert now["peak"]["week"] == 2 and now["trough"]["week"] == 1
+    assert "not priced" in ghost["error"]
+    assert then["league"] == "Then" and then["weekly"][-1]["pct_vs_week1"] == -50.0
+    assert then["trough"]["week"] == 2
+
+
+def test_item_history_stash_series_uses_days_ago(monkeypatch):
+    monkeypatch.setattr(net, "get", lambda url, **k: [{"count": 1, "value": 30, "daysAgo": 0},
+                                                      {"count": 1, "value": 10, "daysAgo": 2}])
+    unit, points = ninja._series("UniqueAccessory", 1, "Now", past=False)
+    assert unit == "chaos" and [(p["day"], p["value"]) for p in points] == [(0, 10), (2, 30)]
+
+
 def test_chunking_splits_long_text():
     pieces = chunk("\n\n".join(["word " * 100] * 10), size=1200)
     assert len(pieces) > 1 and all(len(p) <= 1300 for p in pieces)

@@ -102,6 +102,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "price_history",
+        "description": "Weekly price trajectory of one item (currency, fragment, card, unique, gem...) in a league, "
+                       "optionally next to past leagues (past_leagues=2 or 3) to show how it usually behaves: peak and "
+                       "trough week, and % change versus week 1. Use for 'should I buy/sell/hold now' questions. "
+                       "Past leagues are patterns, not predictions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Item name; fuzzy-matched like price_check."},
+                "category": {"type": "string", "enum": ninja.ALL_TYPES,
+                             "description": "Optional; narrows the match and speeds the lookup."},
+                "past_leagues": {"type": "integer", "minimum": 0, "maximum": 4,
+                                 "description": "Also fetch this many finished softcore leagues for comparison."},
+                "league": LEAGUE_PROP,
+            },
+            "required": ["name"], "additionalProperties": False,
+        },
+    },
+    {
         "name": "find_trade_stat",
         "description": "Resolve mod text such as '+# to maximum Life' or '#% chance to Suppress Spell Damage' to "
                        "official trade stat ids. Prefer pseudo.* ids (they total a stat across all mods).",
@@ -191,7 +210,7 @@ class Toolbox:
             "load_character": self.load_character, "list_characters": self.list_characters,
             "load_pob": self.load_pob, "active_build": self.active_build,
             "price_check": self.price_check, "market_overview": self.market_overview,
-            "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
+            "price_history": self.price_history, "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
             "search_knowledge": self.search_knowledge, "reddit_search": self.reddit_search,
         }
 
@@ -273,6 +292,10 @@ class Toolbox:
                         league: str | None = None) -> dict[str, Any]:
         return {"league": league or ninja.current_league(), "divine_in_chaos": ninja.divine_in_chaos(league),
                 "rows": ninja.market_movers(category, league, sort, limit, min_chaos)}
+
+    def price_history(self, name: str, category: str | None = None, past_leagues: int = 0,
+                      league: str | None = None) -> dict[str, Any]:
+        return ninja.item_history(name, category, league, past_leagues)
 
     def find_trade_stat(self, text: str, limit: int = 6) -> list[dict[str, str]]:
         return trade.find_stats(text, limit)

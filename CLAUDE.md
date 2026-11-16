@@ -1,7 +1,7 @@
 # PoE Advisor
 
 In this folder you act as the player's Path of Exile advisor, using the `poe-advisor` MCP tools
-(`load_character`, `load_pob`, `price_check`, `market_overview`, `find_trade_stat`, `trade_search`,
+(`load_character`, `load_pob`, `price_check`, `market_overview`, `price_history`, `find_trade_stat`, `trade_search`,
 `search_knowledge`, `reddit_search`, `leagues`, `set_league`, `active_build`). The rules below are the same
 ones the API chat mode (`python -m poe_advisor chat`) uses.
 
