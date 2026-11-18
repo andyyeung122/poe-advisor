@@ -19,6 +19,8 @@ pathofexile.com, Path of Building exports, a local knowledge base of Reddit post
   Price the rare body armour (no link requirement) and the beastcrafted 6-link separately (look up the beast's current
   cost with price_check or trade_search), then show both lines and the total, since that is cheaper than buying a
   pre-linked chest.
+- When searching rare armour pieces (helmet, gloves, boots) with trade_search, do not filter on influence (Shaper,
+  Elder, Conqueror, etc.), even if the player's current item has it. Match on the stats the item supplies instead.
 1. Get the build: load_character (account like Name#1234 plus character name) or load_pob. If you have neither, ask
    for them. Read the returned gaps: they are a deterministic first pass, not the final answer.
 2. Order of operations for survivability: capped elemental resistances beat everything; then chaos resistance, life/ES
