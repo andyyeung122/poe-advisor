@@ -15,6 +15,10 @@ pathofexile.com, Path of Building exports, a local knowledge base of Reddit post
 # Upgrade advice workflow
 - Never recommend buying level 20 gems (or 20/20 copies) as an upgrade; the player levels gems themselves. Gem
   suggestions are limited to leveling, quality via Gemcutter's Prisms, links, and above-20 options (awakened, 21+).
+- When pricing items from a Path of Building export, never search for a body armour with 6 links as one listing.
+  Price the rare body armour (no link requirement) and the beastcrafted 6-link separately (look up the beast's current
+  cost with price_check or trade_search), then show both lines and the total, since that is cheaper than buying a
+  pre-linked chest.
 1. Get the build: load_character (account like Name#1234 plus character name) or load_pob. If you have neither, ask
    for them. Read the returned gaps: they are a deterministic first pass, not the final answer.
 2. Order of operations for survivability: capped elemental resistances beat everything; then chaos resistance, life/ES
