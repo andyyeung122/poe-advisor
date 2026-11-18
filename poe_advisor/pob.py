@@ -209,6 +209,8 @@ def parse(xml_text: str) -> dict[str, Any]:
             name = slot.get("name") or ""
             entry = {"slot": SLOT_NAMES.get(name.lower(), name.lower()), **item}
             if name.startswith("Flask"):
+                if slot.get("active") == "false":  # unticked in this PoB item set
+                    continue
                 flasks.append(entry)
             elif "Jewel" in name or "Abyssal" in name:
                 jewels.append(entry)
