@@ -289,10 +289,10 @@ def find_gaps(snap: dict[str, Any]) -> list[dict[str, str]]:
         top = actives[0]
         if (top.get("level") or 0) < 20:
             gaps.append(_gap("damage", "high", f"Main skill {top['name']} is level {top.get('level')}.",
-                             "Level it to 20 (or buy a 20/20); +1 level is usually 5-10% more damage."))
+                             "Level it to 20 yourself (do not buy one); +1 level is usually 5-10% more damage."))
         elif (top.get("quality") or 0) < 20:
             gaps.append(_gap("damage", "medium", f"Main skill {top['name']} has {top.get('quality') or 0}% quality.",
-                             "Gemcutter's Prisms to 20% quality, or buy a 20/20 copy."))
+                             "Gemcutter's Prisms to 20% quality (do not buy a 20/20 copy)."))
         elif level >= 90 and (top.get("level") or 0) == 20:
             gaps.append(_gap("damage", "low", f"Main skill {top['name']} is 20, not 21.",
                              "Vaal a spare 20/20 for a 21, or add +1 socketed/all gem levels on weapon/helmet/amulet."))
@@ -308,7 +308,7 @@ def find_gaps(snap: dict[str, Any]) -> list[dict[str, str]]:
     if low_supports:
         gaps.append(_gap("damage", "medium",
                          "Supports below level 20: " + ", ".join(f"{g['name']} ({g.get('level')})" for g in low_supports),
-                         "Buy or level them to 20; very cheap per % damage."))
+                         "Level them to 20 yourself (do not buy level-20 gems); very cheap per % damage."))
     if level >= 90 and supports and not any(g["name"].startswith("Awakened") for g in supports):
         gaps.append(_gap("damage", "low", "No Awakened support gems in the main link.",
                          "Awakened versions of your best supports are a common late-game damage step."))

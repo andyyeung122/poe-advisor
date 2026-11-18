@@ -8,7 +8,7 @@ from typing import Any, Callable
 import jsonschema
 
 from . import account as ggg
-from . import analysis, feeds, ninja, pob, trade
+from . import analysis, feeds, ninja, passives, pob, timing, trade
 from .config import settings
 from .history_store import HistoryStore
 from .rag import KnowledgeBase, parse_date
@@ -45,6 +45,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "account": {"type": "string", "description": "Account name with discriminator, e.g. Name#1234."},
                 "character": {"type": "string"},
                 "source": {"type": "string", "enum": ["auto", "poe.ninja", "pathofexile.com"]},
+                "league": LEAGUE_PROP,
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "load_stash",
+        "description": "Read the player's own stash (needs POESESSID in .env) and return how much of each currency, "
+                       "fragment, essence and divination card they hold, to work out a budget. Defaults to the "
+                       "currency-style tabs; pass tabs with tab names to read other tabs (e.g. a named bank tab). "
+                       "Omit account to use the player's account from .env. Quantities only: price them with price_check.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string"},
+                "tabs": {"type": "array", "items": {"type": "string"},
+                         "description": "Exact tab names to read instead of the default currency-style tabs."},
                 "league": LEAGUE_PROP,
             },
             "additionalProperties": False,
@@ -100,6 +117,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "league": LEAGUE_PROP,
             },
             "required": ["category"], "additionalProperties": False,
+        },
+    },
+    {
+        "name": "buy_timing",
+        "description": "Buy-now-or-wait read for one item: compares the current league week with what past leagues did "
+                       "over the next two weeks, adds the last two weeks' daily trend, and returns an action "
+                       "(buy_now / wait / wait_few_days), a target price when waiting, and a confidence level. "
+                       "Set urgent=true for an upgrade the player needs now. A pattern, not a forecast.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Item name; fuzzy-matched like price_check."},
+                "category": {"type": "string", "enum": ninja.ALL_TYPES},
+                "urgent": {"type": "boolean"},
+                "past_leagues": {"type": "integer", "minimum": 1, "maximum": 3},
+                "league": LEAGUE_PROP,
+            },
+            "required": ["name"], "additionalProperties": False,
         },
     },
     {
@@ -230,9 +265,10 @@ class Toolbox:
         self._handlers: dict[str, Callable[..., Any]] = {
             "leagues": self.leagues, "set_league": self.set_league,
             "load_character": self.load_character, "list_characters": self.list_characters,
+            "load_stash": self.load_stash,
             "load_pob": self.load_pob, "active_build": self.active_build,
             "price_check": self.price_check, "market_overview": self.market_overview,
-            "price_history": self.price_history, "history_search": self.history_search, "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
+            "price_history": self.price_history, "buy_timing": self.buy_timing,"history_search": self.history_search, "find_trade_stat": self.find_trade_stat, "trade_search": self.trade_search,
             "search_knowledge": self.search_knowledge, "reddit_search": self.reddit_search,
         }
 
@@ -286,10 +322,40 @@ class Toolbox:
                 errors.append(f"poe.ninja: {exc}")
         if source in ("auto", "pathofexile.com"):
             try:
-                return self._activate(analysis.from_ggg(ggg.get_items(account, character), account))
+                snapshot = analysis.from_ggg(ggg.get_items(account, character), account)
+                try:
+                    tree = passives.get_passive_tree(account, character)
+                    snapshot["passive_tree"] = tree
+                    snapshot["keystones"] = tree.get("keystones", [])
+                except Exception as exc:  # the tree is a bonus: gear alone is still useful
+                    snapshot["passive_tree_error"] = str(exc)
+                return self._activate(snapshot)
             except Exception as exc:
                 errors.append(f"pathofexile.com: {exc}")
         raise RuntimeError("; ".join(errors) + " | Ask the user for a Path of Building code as a fallback.")
+
+    _STASH_DEFAULT_TYPES = {"CurrencyStash", "FragmentStash", "EssenceStash", "DivinationCardStash"}
+
+    def load_stash(self, account: str | None = None, tabs: list[str] | None = None,
+                   league: str | None = None) -> dict[str, Any]:
+        account = account or settings.account
+        if not account:
+            raise ValueError("No account given and POE_ACCOUNT is not set in .env.")
+        if not settings.poesessid:
+            raise ValueError("Reading a stash needs POESESSID in .env (stash tabs are not exposed without it).")
+        league = league or ninja.current_league()
+        all_tabs = ggg.get_stash_tabs(account, league)
+        wanted = [t for t in all_tabs if (t["name"] in tabs if tabs else t["type"] in self._STASH_DEFAULT_TYPES)]
+        holdings: dict[str, dict[str, int]] = {}
+        for tab in wanted:
+            counts: dict[str, int] = {}
+            for item in ggg.get_stash_tab(account, league, tab["index"]):
+                name = item.get("typeLine") or item.get("baseType") or "?"
+                counts[name] = counts.get(name, 0) + int(item.get("stackSize") or 1)
+            holdings[f"{tab['name']} ({tab['type']})"] = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+        return {"league": league, "divine_in_chaos": ninja.divine_in_chaos(league), "holdings": holdings,
+                "tabs_available": [f"{t['name']} ({t['type']})" for t in all_tabs if t["name"]],
+                "note": "Quantities only; price them with price_check before totalling a budget."}
 
     def list_characters(self, account: str) -> list[dict[str, Any]]:
         return ggg.list_characters(account)
@@ -314,6 +380,14 @@ class Toolbox:
                         league: str | None = None) -> dict[str, Any]:
         return {"league": league or ninja.current_league(), "divine_in_chaos": ninja.divine_in_chaos(league),
                 "rows": ninja.market_movers(category, league, sort, limit, min_chaos)}
+
+    def buy_timing(self, name: str, category: str | None = None, urgent: bool = False, past_leagues: int = 3,
+                   league: str | None = None) -> dict[str, Any]:
+        history = ninja.item_history(name, category, league, past_leagues, store=HistoryStore.from_settings(),
+                                     daily=True)
+        result = timing.recommend(history, urgent=urgent)
+        result["divine_in_chaos"] = ninja.divine_in_chaos(league)
+        return result
 
     def price_history(self, name: str, category: str | None = None, past_leagues: int = 0,
                       league: str | None = None) -> dict[str, Any]:

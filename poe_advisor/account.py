@@ -43,3 +43,19 @@ def list_characters(account: str) -> list[dict[str, Any]]:
 
 def get_items(account: str, character: str) -> dict[str, Any]:
     return _call("get-items", {"accountName": account, "character": character})
+
+
+def get_stash_tabs(account: str, league: str) -> list[dict[str, Any]]:
+    """Tab list (index, name, type). Needs POESESSID."""
+    data = _call("get-stash-items", {"accountName": account, "league": league, "tabs": "1", "tabIndex": "0"})
+    return [{"index": t.get("i"), "name": t.get("n"), "type": t.get("type")} for t in data.get("tabs") or []]
+
+
+def get_stash_tab(account: str, league: str, index: int) -> list[dict[str, Any]]:
+    data = _call("get-stash-items", {"accountName": account, "league": league, "tabs": "0", "tabIndex": str(index)})
+    return data.get("items") or []
+
+
+def get_passive_skills(account: str, character: str) -> dict[str, Any]:
+    """Allocated node hashes, mastery choices and jewel data (public profile, same rules as get-items)."""
+    return _call("get-passive-skills", {"accountName": account, "character": character})

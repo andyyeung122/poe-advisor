@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "poe-advisor": {
-      "command": "C:/Users/hqcql/Documents/Projects/poe-advisor/.venv/Scripts/python.exe",
+      "command": "C:/Users/andyy/Documents/Projects/poe-advisor/.venv/Scripts/python.exe",
       "args": ["-m", "poe_advisor.mcp_server"],
       "env": {
         "PYTHONUTF8": "1"

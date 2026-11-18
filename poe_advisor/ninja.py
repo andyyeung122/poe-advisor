@@ -334,7 +334,7 @@ def _league_summary(league: str, status: str, unit: str, points: list[dict[str, 
 
 
 def item_history(name: str, category: str | None = None, league: str | None = None,
-                 past_leagues: int = 0, store: Any = None) -> dict[str, Any]:
+                 past_leagues: int = 0, store: Any = None, daily: bool = False) -> dict[str, Any]:
     """Weekly price trajectory of one item in a league, optionally alongside past leagues for comparison.
 
     ``store`` (a HistoryStore) is read first for past leagues and written after a live fetch. Without one, past
@@ -352,6 +352,8 @@ def item_history(name: str, category: str | None = None, league: str | None = No
     unit, points = _series(category, row["item_id"], league, past=False)
     if points:
         results.append(_league_summary(league, "requested", unit, points))
+        if daily:  # the last four weeks of daily points, for short-horizon timing (not stored for past leagues)
+            results[-1]["recent_daily"] = [{"day": p["day"], "value": p["value"]} for p in points[-28:]]
     else:
         results.append({"league": league, "status": "requested", "error": "no history yet"})
 
